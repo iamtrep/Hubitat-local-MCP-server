@@ -1657,6 +1657,7 @@ For easier bug reporting:
 
 ## Version History
 
+- **v4.3.9** - fix: copy a variable into a String target through valStringOp. PRs: [#445](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/445)
 - **v4.3.8** - feat: optional digit suffix on hub tool names. PRs: [#444](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/444)
 - **v4.3.7** - fix: Rule Machine variable, settle, this-rule and wording corrections. PRs: [#441](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/441)
 - **v4.3.6** - ci: publish fork PR library bundles after e2e approval; ci: scan only the fork files the e2e job executes; fix: report unverified standalone rule edits and recovery outcomes. PRs: [#436](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/436), [#440](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/440), [#437](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/437)
