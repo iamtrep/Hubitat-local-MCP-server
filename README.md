@@ -1668,6 +1668,7 @@ For easier bug reporting:
 
 ## Version History
 
+- **v4.4.6** - fix: native-app device pickers, sub-pages and UI page checks; Room Lighting create. PRs: [#477](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/477)
 - **v4.4.5** - feat: per-device and per-variable Hub Mesh link/share (#448). PRs: [#462](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/462)
 - **v4.4.4** - fix: refused addAction editor cleanup, modern-era check, setVariable numOp, patches trigger/action ops. PRs: [#471](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/471)
 - **v4.4.3** - fix: hub_report_issue reports the real hub model; make bug-report error retention opt-in. PRs: [#468](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/468)
