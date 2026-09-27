@@ -1648,6 +1648,8 @@ class TestRunner:
         "switch_b": ("E2E_PERM_Switch_B", "Virtual Switch"),
         "dimmer":   ("E2E_PERM_Dimmer",   "Virtual Dimmer"),
         "button":   ("E2E_PERM_Button",   "Virtual Button"),
+        "motion":   ("E2E_PERM_Motion",   "Virtual Motion Sensor"),
+        "omni":     ("E2E_PERM_Omni",     "Virtual Omni Sensor"),
     }
 
     def _ensure_perm_fixture(self, key: str) -> str:
@@ -5705,11 +5707,23 @@ class TestRunner:
             assert periodic.get("success") is False and "periodic" in str(periodic.get("error", "")).lower(), \
                 f"Periodic Schedule minutes:1 should fail loud steering to periodic, got: {periodic}"
             # The pre-flight refusal mutated nothing, so the edit-path restoreHint must report
-            # that RM was not touched -- NOT the misleading "Backup saved before write; call
+            # that the app was not touched -- NOT the misleading "Backup saved before write; call
             # hub_restore_backup" prompt for a write that never ran.
             assert "not touched" in str(periodic.get("restoreHint", "")).lower() \
                 and "backup saved before write" not in str(periodic.get("restoreHint", "")).lower(), \
                 f"periodic pre-flight refusal should carry a not-touched restoreHint, got: {periodic.get('restoreHint')!r}"
+            # A periodic key the walker does not read would be dropped silently; it is refused by name.
+            unknown_key = self._refusal_call("hub_manage_rule_machine", {"tool": "hub_set_rule",
+                "args": {"appId": app_id, "addTrigger": {"capability": "Periodic Schedule",
+                         "periodic": {"frequency": "Daily", "everyN": 1, "time": "08:00"}}, "confirm": True}})
+            assert unknown_key.get("success") is False and "unknown periodic key(s) [time]" in str(unknown_key.get("error", "")), \
+                f"an unknown periodic key should be refused by name, got: {unknown_key}"
+            # A Certain Time trigger's time is its mode picker; a clock value there is refused.
+            bad_time = self._refusal_call("hub_manage_rule_machine", {"tool": "hub_set_rule",
+                "args": {"appId": app_id, "addTrigger": {"capability": "Certain Time (and optional date)",
+                         "time": "17:30"}, "confirm": True}})
+            assert bad_time.get("success") is False and "addTrigger.time must be one of" in str(bad_time.get("error", "")), \
+                f"a Certain Time time outside its options should be refused, got: {bad_time}"
             # The remaining handler-level validators run as ordered patches in one logical
             # continuation-aware call. Each is pre-write, so the batch may continue after a
             # refusal without accumulating mutations; the final config read below is binding.
@@ -6635,6 +6649,112 @@ class TestRunner:
                     "tool": "hub_delete_native_app", "args": {"appId": app_id, "confirm": True}}),
                 lambda: not self._app_still_present(app_id),
                 "basic_rule delete",
+            )
+            if not dw["relayDropped"] or dw["committed"]:
+                self._untrack_native_app(app_id)
+
+    @test("native_apps")
+    def test_set_native_app_room_lighting_lifecycle(self) -> None:
+        # Issues #460/#461. Room Lighting: create by appType, the sub-pages its page links, a device
+        # picker written as the {id: label} map hub_get_app_config returns, the motion inputs that
+        # live on onMeansPage, and a sub-page Done that Hubitat's own page refuses while a required
+        # input (marked * in the UI) is empty. A hub without the Room Lighting parent gets it from the
+        # create itself (Add Built-In App), once; this test deletes only its child.
+        switch_a = self._ensure_perm_fixture("switch_a")
+        switch_b = self._ensure_perm_fixture("switch_b")
+        motion = self._ensure_perm_fixture("motion")
+        omni = self._ensure_perm_fixture("omni")
+        create_label = f"{PREFIX}RoomLights"
+        cw = self._soft_write(
+            lambda: self.client.call_tool("hub_manage_native_rules_and_apps", {
+                "tool": "hub_set_native_app",
+                "args": {"appType": "room_lighting", "name": create_label, "confirm": True}}),
+            lambda: self._find_app_id_by_label(create_label),
+            "room_lighting create",
+        )
+        if cw["relayDropped"]:
+            assert cw["committed"], f"room_lighting create lost to relay 504 and never committed ({create_label})"
+            app_id = cw["evidence"]
+        else:
+            app_id = cw["response"].get("appId")
+            assert app_id, f"room_lighting create did not return an appId: {cw['response']}"
+        self.created_native_app_ids.append(str(app_id))
+
+        def call_native(args: dict) -> dict:
+            return self.client.call_tool("hub_manage_native_rules_and_apps", {
+                "tool": "hub_set_native_app", "args": {"appId": app_id, "confirm": True, **args}})
+
+        def settings() -> dict:
+            cfg = self.client.call_tool("hub_read_apps_code", {
+                "tool": "hub_get_app_config", "args": {"appId": app_id, "includeSettings": True}})
+            return cfg.get("settings") or {}
+
+        try:
+            cfg = self.client.call_tool("hub_read_apps_code", {"tool": "hub_get_app_config", "args": {"appId": app_id}})
+            assert (cfg.get("app") or {}).get("name") == "Room Lights", f"unexpected Room Lights config: {cfg}"
+
+            # The page links its sub-pages; the listing reads them instead of claiming a single page.
+            pages = self.client.call_tool("hub_read_apps_code", {"tool": "hub_list_app_pages", "args": {"appId": app_id}})
+            names = [p.get("name") for p in (pages.get("pages") or [])]
+            assert {"onMeansPage", "offMeansPage"} <= set(names), f"Room Lights sub-pages not listed: {pages}"
+            assert "onMeansPage" in [h.get("page") for h in ((cfg.get("page") or {}).get("hrefs") or [])], \
+                f"hub_get_app_config should expose the page's sub-page links: {cfg.get('page')}"
+
+            # #460: the {id: label} map shape the read returns is accepted on write...
+            wr = call_native({"settings": {"roomDevsL": {switch_a: "a", switch_b: "b"}}})
+            assert wr.get("success") is True, f"device-map write failed: {wr}"
+            assert set((settings().get("roomDevsL") or {}).keys()) == {switch_a, switch_b}, \
+                f"roomDevsL should hold both switches: {settings().get('roomDevsL')}"
+            # ...and takes effect: the Update commit re-subscribes the instance to the new devices.
+            health = self.client.call_tool("hub_read_rules", {"tool": "hub_get_rule_health", "args": {"appId": app_id}})
+            assert (health.get("eventSubscriptionCount") or 0) >= 2, \
+                f"the write must reach the running instance (subscriptions), not just storage: {health}"
+
+            # #461: the motion trigger lives on onMeansPage, revealed by choosing the means first.
+            on = call_native({"walkStep": {"operation": "drive", "steps": [
+                {"page": "mainPage", "operation": "navigate", "navigate": {"targetPage": "onMeansPage"}},
+                {"page": "onMeansPage", "operation": "write", "write": {"onMeans": ["motion becomes active"]},
+                 "hrefContext": {"fromPage": "mainPage"}},
+                {"page": "onMeansPage", "operation": "write", "write": {"motions": [motion]},
+                 "hrefContext": {"fromPage": "mainPage"}},
+                {"page": "onMeansPage", "operation": "done", "hrefContext": {"fromPage": "mainPage"}}]}})
+            assert on.get("success") is True, f"onMeansPage drive failed: {on}"
+            assert (on["steps"][1].get("valueEcho") or {}).get("match") is True, \
+                f"a multi-select enum write should echo as matching: {on['steps'][1]}"
+            assert motion in (settings().get("motions") or {}), f"motions not set: {settings().get('motions')}"
+
+            # The UI refuses this Done while the required illuminance picker is empty; so does the tool.
+            off = call_native({"walkStep": {"operation": "drive", "steps": [
+                {"page": "mainPage", "operation": "navigate", "navigate": {"targetPage": "offMeansPage"}},
+                {"page": "offMeansPage", "operation": "write", "write": {"offMeans": ["illuminance rises"]},
+                 "hrefContext": {"fromPage": "mainPage"}},
+                {"page": "offMeansPage", "operation": "done", "hrefContext": {"fromPage": "mainPage"}}]}})
+            assert off.get("success") is False and "required but empty" in str((off.get("steps") or [{}])[-1].get("error")), \
+                f"Done with an empty required input must be refused: {off}"
+            # The same refusal as a single step posts nothing, so it must not steer toward a backup restore.
+            single = call_native({"walkStep": {"page": "offMeansPage", "operation": "done",
+                                               "hrefContext": {"fromPage": "mainPage"}}})
+            assert single.get("success") is False and "the app was not touched" in str(single.get("restoreHint")), \
+                f"a refused Done must report that nothing was submitted: {single}"
+            # The {id: label} map form is accepted by walkStep too, and echoes as the committed id.
+            fixed = call_native({"walkStep": {"operation": "drive", "steps": [
+                {"page": "offMeansPage", "operation": "write", "write": {"illumsOff": {omni: "omni"}},
+                 "hrefContext": {"fromPage": "mainPage"}},
+                {"page": "offMeansPage", "operation": "done", "hrefContext": {"fromPage": "mainPage"}}]}})
+            assert fixed.get("success") is True, f"Done should pass once the required input is set: {fixed}"
+            assert (fixed["steps"][0].get("valueEcho") or {}).get("match") is True, \
+                f"a map-form device write should echo as matching: {fixed['steps'][0]}"
+            off_settings = settings()
+            assert omni in (off_settings.get("illumsOff") or {}), f"illumsOff not set: {off_settings.get('illumsOff')}"
+            # An input left unset is saved with the page's default, as the UI submits it.
+            assert str(off_settings.get("luxOff")) == "100", \
+                f"luxOff should hold the page default 100, not blank: {off_settings.get('luxOff')}"
+        finally:
+            dw = self._soft_write(
+                lambda: self.client.call_tool("hub_manage_native_rules_and_apps", {
+                    "tool": "hub_delete_native_app", "args": {"appId": app_id, "force": True, "confirm": True}}),
+                lambda: not self._app_still_present(app_id),
+                "room_lighting delete",
             )
             if not dw["relayDropped"] or dw["committed"]:
                 self._untrack_native_app(app_id)
@@ -9674,9 +9794,34 @@ class TestRunner:
         finally:
             self._delete_native(app_id)
 
-        # Fail-closed create across sections: the clean trigger lands, the refused trigger stops the
-        # create, and the Required Expression and action sections are never written. A new rule has
-        # no pre-operation backup, so this fixture is deleted rather than restored.
+        # An argument the checks can refuse up front is refused BEFORE the rule is created: no rule
+        # with the label may exist afterwards.
+        self._native_rule_fixture_seq = getattr(self, "_native_rule_fixture_seq", 0) + 1
+        refused_label = f"{PREFIX}CreateRefused_{_run_artifact_suffix()}_{self._native_rule_fixture_seq}"
+        try:
+            refused = self.client.call_tool("hub_manage_rule_machine", {
+                "tool": "hub_set_rule",
+                "args": {
+                    "name": refused_label,
+                    "addTriggers": [
+                        {"capability": "Switch", "deviceIds": [sw], "state": "on"},
+                        {"capability": "Temperature", "value": "increased"},
+                    ],
+                    "confirm": True,
+                }})
+            raise AssertionError(f"a create with an argument-refused trigger must be refused, got: {refused}")
+        except McpToolError as exc:
+            assert "No rule was created" in str(exc) and "triggers[1]" in str(exc), \
+                f"the create refusal must name the item and say no rule was created: {exc}"
+        leftover = self._find_app_id_by_label(refused_label)
+        if leftover:
+            self._delete_native(leftover)
+            raise AssertionError(f"an argument-refused create left rule {leftover} behind")
+
+        # Fail-closed create across sections: the clean trigger lands, a trigger only the live wizard
+        # can refuse (a capability outside its picker) stops the create, and the Required Expression
+        # and action sections are never written. A new rule has no pre-operation backup, so this
+        # fixture is deleted rather than restored.
         self._native_rule_fixture_seq = getattr(self, "_native_rule_fixture_seq", 0) + 1
         stop_label = f"{PREFIX}CreateStop_{_run_artifact_suffix()}_{self._native_rule_fixture_seq}"
         skipped_msg = "E2E create stop skipped action"
@@ -9687,7 +9832,7 @@ class TestRunner:
                     "name": stop_label,
                     "addTriggers": [
                         {"capability": "Switch", "deviceIds": [sw], "state": "on"},
-                        {"capability": "Temperature", "value": "increased"},
+                        {"capability": "E2E Not A Trigger Capability"},
                     ],
                     "addRequiredExpression": {"conditions": [
                         {"capability": "Switch", "deviceIds": [sw], "state": "on"}]},
