@@ -4366,6 +4366,14 @@ private Map _rmRemoveTrigger(Integer appId, Integer triggerIdx) {
 // Scope: only state-value changes (mods.state) are supported. Capability and
 // deviceIds changes require removeTrigger + addTrigger because RM's wizard
 // does not expose a capability-change path in an existing trigger slot.
+private String _rmModifyTriggerNoStateMessage(Integer triggerIdx) {
+    return "modifyTrigger: trigger ${triggerIdx} has no 'state' value to change -- this trigger does not expose a plain state field. Use removeTrigger + addTrigger to reconfigure it.".toString()
+}
+
+private String _rmModifyTriggerWizardRecoveryHint(Integer appId) {
+    return "A trigger editor may still be open. Inspect hub_get_app_config(appId=${appId}, pageName='selectTriggers', includeSettings=true) before another edit. Only if the original trigger editor remains open, close it with hub_set_rule(appId=${appId}, button='hasAll', pageName='selectTriggers', confirm=true), then verify it closed with hub_get_app_config. Do not click hasAll again if the editor already closed.".toString()
+}
+
 private Map _rmModifyTrigger(Integer appId, Integer triggerIdx, Map mods) {
     def unsupported = mods.keySet() - ["state"]
     if (unsupported) {
@@ -4402,6 +4410,11 @@ private Map _rmModifyTrigger(Integer appId, Integer triggerIdx, Map mods) {
             throw new IllegalArgumentException("modifyTrigger.mods.state:'${mods.state}' looks like a state-change comparator token, but modifyTrigger only edits a device-state trigger's value and cannot set a comparator. For a state-change trigger use removeTrigger then addTrigger with comparator:'*changed*' (or '*became*'/'*increased*'/'*decreased*'). RM is not touched.")
         }
     }
+    // Time-family triggers have no state value. Refuse before opening the editor, which would
+    // otherwise stay open on the trigger after the refusal.
+    if (_rmTriggerCapabilityFamily(triggerCaps.get(triggerIdx)) == "time") {
+        throw new IllegalArgumentException(_rmModifyTriggerNoStateMessage(triggerIdx) + " RM is not touched.")
+    }
     // Open the edit-condition wizard for this trigger.
     _rmClickAppButton(appId, triggerIdx.toString(), "editCond", "selectTriggers")
     // Write the modified state field through the schema-aware helper.
@@ -4417,11 +4430,12 @@ private Map _rmModifyTrigger(Integer appId, Integer triggerIdx, Map mods) {
     def tstateName = "tstate${triggerIdx}".toString()
     def schemaSkipped = skipped.find { it instanceof Map && it.key == tstateName && it.reason == "not_in_schema" }
     if (schemaSkipped) {
-        throw new IllegalArgumentException(
-            "modifyTrigger: trigger ${triggerIdx} does not expose a 'state' field on selectTriggers schema. " +
-            "Time and Periodic triggers do not have a state value (they fire on schedule, not on a state change). " +
-            "Workaround: removeTrigger + addTrigger to reconfigure with the new shape."
-        )
+        // Nothing was written, so Done re-commits the trigger unchanged and closes its editor.
+        try { _rmClickAppButton(appId, "hasAll", null, "selectTriggers") } catch (Exception closeExc) {
+            mcpLog("warn", "rm-native", "_rmModifyTrigger: closing trigger ${triggerIdx}'s editor on app ${appId} failed (${closeExc.message}) -- it may still be open")
+            throw new IllegalStateException(_rmModifyTriggerNoStateMessage(triggerIdx) + " [wizardStuck -- hasAll cleanup failed: ${closeExc.message ?: closeExc.toString()}]")
+        }
+        throw new IllegalArgumentException(_rmModifyTriggerNoStateMessage(triggerIdx))
     }
     // Commit the in-flight edit via hasAll on selectTriggers.
     _rmClickAppButton(appId, "hasAll", null, "selectTriggers")
@@ -7135,6 +7149,9 @@ Map _rmAddAction(Integer appId, Map actionSpec, boolean intraBatch = false, Set 
             mcpLog("debug", "rm-native", "_rmAddAction: cond not in doActPage schema after actType/actSubType for app ${appId} action ${idx} (${condContextClear[0]?.reason}) -- skipped (non-expression action; predCapabs already cleared via ghost ifThen in addRequiredExpression)")
         }
 
+        if (cap == "fileAppend" || cap == "fileDelete") {
+            _rmRequireExistingHubFile(appId, idx, cap == "fileAppend" ? "localFile" : "deleteFile", actionSpec.fileName, cap.toString())
+        }
         // Type-specific fields. The @N placeholder in keys is substituted with
         // the action index here.
         fields.each { rawKey, value ->
@@ -10261,7 +10278,14 @@ private Map _rmReadLocalVarsMap(Integer appId) {
         return [ok: true, vars: [:]]
     }
     def raw = (appState ?: []).find { it?.name?.toString() == "allLocalVars" }?.value
-    return [ok: true, vars: (raw instanceof Map) ? raw : [:]]
+    // A running rule updates lv_<name>; allLocalVars only catches up when the rule's page renders.
+    def live = [:]
+    (appState ?: []).each { e ->
+        def n = e?.name?.toString()
+        // Local names can be sandbox property names such as fields; use Map.put for arbitrary keys.
+        if (n?.startsWith("lv_") && e.value instanceof Map) live.put(n.substring(3), e.value)
+    }
+    return [ok: true, vars: (raw instanceof Map) ? raw : [:], live: live]
 }
 
 // Add a local variable to a Rule Machine 5.1 rule.
@@ -11281,6 +11305,19 @@ private void _rmWriteRunCommandParams(Integer appId, Integer idx, Map actionSpec
                 _rmWriteSettingOnPage(appId, "doActPage", cpValField, pValue, applied, null, skipped)
             }
         }
+    }
+}
+
+// fileAppend/fileDelete pick from RM's list of existing hub files. RM stores any other name but
+// shows the picker empty and marks the rule broken once the action is edited (live-verified).
+private void _rmRequireExistingHubFile(Integer appId, Integer idx, String field, fileName, String capLabel) {
+    def wanted = "${field}.${idx}".toString()
+    def input = (_rmFetchConfigJson(appId, "doActPage")?.configPage?.sections ?: [])
+        .collectMany { sec -> sec?.input ?: [] }.find { it instanceof Map && it.name?.toString() == wanted }
+    if (!(input?.options instanceof List)) return
+    def names = (input.options as List).collectMany { o -> o instanceof Map ? (o.keySet() as List) : [o] }*.toString()
+    if (!names.contains(fileName?.toString())) {
+        throw new IllegalArgumentException("${capLabel}: '${fileName}' is not a file on the hub, and ${capLabel} only works on an existing file. Check the name with hub_list_files, or create the file first (fileWrite action or hub_write_file).")
     }
 }
 
@@ -14039,7 +14076,10 @@ private Map _rmBulkStoppedResult(Integer appId, Map backup, String stoppedAfter,
     try { stuck = groovy.json.JsonOutput.toJson(stopItem ?: [:]).contains("[wizardStuck") } catch (Exception ignored) { stuck = false }
     if (stuck) {
         out.wizardStuck = true
-        out.repairHints = (["An item left an editor open (wizardStuck). Close it before any retry: hub_set_rule(button='actionCancel', pageName='doActPage', confirm=true) for an action, or button='cancelCapab' with the wizard's pageName for a condition. Verify with hub_get_app_config(includeSettings=true), then retry the failed item.".toString()] + (out.repairHints as List))
+        def recoveryHint = (stopItem instanceof Map && stopItem.op == "modifyTrigger") ?
+            _rmModifyTriggerWizardRecoveryHint(appId) :
+            "An item left an editor open (wizardStuck). Close it before any retry: hub_set_rule(button='actionCancel', pageName='doActPage', confirm=true) for an action, or button='cancelCapab' with the wizard's pageName for a condition. Verify with hub_get_app_config(includeSettings=true), then retry the failed item.".toString()
+        out.repairHints = ([recoveryHint] + (out.repairHints as List))
     }
     out.putAll(extra ?: [:])
     return out
@@ -14894,6 +14934,10 @@ def _applyNativeAppEdit(args) {
             if (isRetryExhaustion) {
                 trigResult.verifyHint = "Call hub_get_app_config(appId=${appId}) and inspect the triggers list -- if the operation actually committed despite the false-fail, do NOT call hub_restore_backup."
             }
+            if (e.message?.contains("[wizardStuck")) {
+                trigResult.wizardStuck = true
+                trigResult.restoreHint = _rmModifyTriggerWizardRecoveryHint(appId) + " " + trigResult.restoreHint
+            }
             return trigResult
         }
         // Trailing updateRule fires AFTER the mutation completes. Hoisted out
@@ -15166,6 +15210,10 @@ def _applyNativeAppEdit(args) {
                 def pm = p as Map
                 try {
                     if (pm.containsKey("settings")) {
+                        // Same object-value refusal as top-level settings; without it the map is saved as its text.
+                        if (pm.settings instanceof Map && (pm.settings as Map).values().any { it instanceof Map }) {
+                            _rmRejectNonDeviceMapSettings(appId, pm.pageName?.toString()?.trim() ?: null, pm.settings as Map)
+                        }
                         // Apply settings via _rmUpdateAppSettings (no auto-updateRule).
                         def cfg = _rmFetchConfigJson(appId, pm.pageName?.toString())
                         def schema = _rmCollectInputSchema(cfg?.configPage)
@@ -16159,11 +16207,9 @@ def toolCheckRuleHealth(args) {
     return result
 }
 
-// hub_list_rule_local_variables -- read a rule's local-variable namespace
-// (state.allLocalVars) from its statusJson appState. Pure read; no wizard.
-// Returns {appId, localVariables:[{name, type, value}], total}. The statusJson
-// allLocalVars map is {name: {type, value}}; an absent map means the rule has
-// no locals (returns an empty list, not an error).
+// hub_list_rule_local_variables -- read a rule's local variables from its statusJson appState.
+// Pure read; no wizard. Returns {appId, localVariables:[{name, type, value}], total}; an absent
+// allLocalVars map means the rule has no locals (an empty list, not an error).
 def toolListRuleLocalVariables(args) {
     if (args?.appId == null) throw new IllegalArgumentException("appId is required")
     def appId = normalizeRuleId(args.appId)
@@ -16176,10 +16222,11 @@ def toolListRuleLocalVariables(args) {
     }
     def localVariables = []
     lvRead.vars.each { lvName, lvMeta ->
+        def live = lvRead.live?.get(lvName?.toString())
         localVariables << [
             name: lvName?.toString(),
             type: (lvMeta instanceof Map ? lvMeta?.type?.toString() : null),
-            value: (lvMeta instanceof Map ? lvMeta?.value : null)
+            value: (live instanceof Map && live.containsKey("value")) ? live.value : (lvMeta instanceof Map ? lvMeta?.value : null)
         ]
     }
     localVariables = localVariables.sort { it.name }
@@ -16193,7 +16240,7 @@ def _readOnlyToolNames_partNativeRM() {
     // with the tool), contributed to the app's getReadOnlyToolNames() aggregator.
     return [
         // Native rules (read) -- hub_get_rule_health inspects only;
-        // hub_list_rule_local_variables reads state.allLocalVars only.
+        // hub_list_rule_local_variables reads the rule's statusJson only.
         // (hub_export_native_app -- in McpAppClonerLib -- instantiates a cloner app + persists, so it stays write.)
         "hub_list_rules", "hub_get_rule_health", "hub_list_rule_local_variables"
     ]

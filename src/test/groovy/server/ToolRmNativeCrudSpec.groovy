@@ -2499,6 +2499,75 @@ class ToolRmNativeCrudSpec extends ToolSpecBase {
         ])
     }
 
+    // Live-verified: RM stored a missing file name, showed the picker empty and marked the rule broken.
+    @spock.lang.Unroll
+    def "addAction #cap refuses a file RM's picker does not list, and rolls the row back"() {
+        given:
+        enableWrite()
+        def doAct = ruleConfigJson(100, "r", [
+            [name: "actType.1", type: "enum", options: ["modeActs": "Set Mode or Variables, Run Custom Action, File"]],
+            [name: "actSubType.1", type: "enum", options: [(subType): "file"]],
+            [name: "${field}.1".toString(), type: "enum", options: ["notes.txt", "log.json"]],
+            [name: "fileContents.1", type: "textarea"],
+            [name: "actionCancel", type: "button"]
+        ])
+        hubGet.register('/installedapp/configure/json/100') { params -> ruleConfigJson(100, "r", []) }
+        hubGet.register('/installedapp/configure/json/100/selectActions') { params -> ruleConfigJson(100, "r", [[name: "N", type: "button"]]) }
+        hubGet.register('/installedapp/configure/json/100/doActPage') { params -> doAct }
+        hubGet.register('/installedapp/configure/json/100/mainPage') { params -> ruleConfigJson(100, "r", []) }
+        hubGet.register('/installedapp/statusJson/100') { params -> statusJson(100) }
+        script.metaClass.uploadHubFile = { String fn, byte[] b -> }
+        def posts = []
+        script.metaClass.hubInternalPostForm = { String path, Map body, Integer t = 420 ->
+            posts << [path: path, body: body]
+            [status: 200, location: null, data: '']
+        }
+
+        when:
+        script._rmAddAction(100, [capability: cap, fileName: "missing.txt", content: "x"])
+
+        then:
+        def ex = thrown(IllegalArgumentException)
+        ex.message.contains("'missing.txt' is not a file on the hub")
+        !posts.any { p -> p.body?.keySet()?.any { it.toString() == "settings[${field}.1]".toString() } }
+        posts.any { it.path == "/installedapp/btn" && it.body?.name == "actionCancel" }
+
+        where:
+        cap          | subType               | field
+        "fileAppend" | "getAppendLocalFile"  | "localFile"
+        "fileDelete" | "getDeleteLocalFile"  | "deleteFile"
+    }
+
+    def "addAction fileAppend writes a file RM's picker lists"() {
+        given:
+        enableWrite()
+        def doAct = ruleConfigJson(100, "r", [
+            [name: "actType.1", type: "enum", options: ["modeActs": "file"]],
+            [name: "actSubType.1", type: "enum", options: ["getAppendLocalFile": "Append"]],
+            [name: "localFile.1", type: "enum", options: ["notes.txt"]],
+            [name: "fileContents.1", type: "textarea"]
+        ])
+        hubGet.register('/installedapp/configure/json/100') { params -> ruleConfigJson(100, "r", []) }
+        hubGet.register('/installedapp/configure/json/100/selectActions') { params -> ruleConfigJson(100, "r", [[name: "N", type: "button"]]) }
+        hubGet.register('/installedapp/configure/json/100/doActPage') { params -> doAct }
+        hubGet.register('/installedapp/configure/json/100/mainPage') { params -> ruleConfigJson(100, "r", []) }
+        hubGet.register('/installedapp/statusJson/100') { params -> statusJson(100) }
+        script.metaClass.uploadHubFile = { String fn, byte[] b -> }
+        def posts = []
+        script.metaClass.hubInternalPostForm = { String path, Map body, Integer t = 420 ->
+            posts << [path: path, body: body]
+            [status: 200, location: null, data: '']
+        }
+
+        when: "only the file check is under test, so the add's later steps may fail against this stub"
+        def err = null
+        try { script._rmAddAction(100, [capability: "fileAppend", fileName: "notes.txt", content: "x"]) } catch (Exception e) { err = e }
+
+        then:
+        !(err?.message?.contains("is not a file on the hub"))
+        posts.any { it.path == "/installedapp/update/json" && it.body?."settings[localFile.1]" == "notes.txt" }
+    }
+
     def "seam: _rmAddAction fires the deferred predCapabs clear at its entry (ghost POSTs precede the action's own writes; flag dropped)"() {
         // TEST A. Pins the _rmAddAction entry seam (lib ~4295): a real (non-discover) addAction
         // calls _rmRunPendingPredCapabsClear FIRST, so the deferred ghost ifThen sequence
@@ -6097,6 +6166,7 @@ class ToolRmNativeCrudSpec extends ToolSpecBase {
         posts.find { it.path == "/installedapp/btn" && it.body?.name == "actionCancel" }?.body?.currentPage == "doActPage"
         !btns.contains("cancelAct")
         !btns.contains("delAct")
+
 
         where:
         condWizardOpen | expectedButtons
@@ -25412,20 +25482,20 @@ class ToolRmNativeCrudSpec extends ToolSpecBase {
         !result.restoreHint?.contains("Backup saved before write")
     }
 
-    def "modifyTrigger returns success: false when trigger has no state field in schema (Time/Periodic trigger)"() {
+    @spock.lang.Unroll
+    def "modifyTrigger closes the editor when #cap has no state field"() {
         given:
         enableWrite()
-        // selectTriggers schema does NOT include tstate1 -- simulating a Time or
-        // Periodic trigger whose wizard page only exposes scheduling fields.
+        // Non-device triggers expose specialized fields instead of tstate1.
         def selectTriggersSchema = [
-            [name: "tCapab1", type: "enum", options: ["Time"]]
+            [name: "tCapab1", type: "enum", options: [cap]]
         ]
         hubGet.register('/installedapp/configure/json/100') { params -> ruleConfigJson(100, "r", []) }
         hubGet.register('/installedapp/configure/json/100/selectTriggers') { params ->
             ruleConfigJson(100, "r", selectTriggersSchema)
         }
         hubGet.register('/installedapp/statusJson/100') { params ->
-            statusJson(100, [[name: "tCapab1", value: "Time"]])
+            statusJson(100, [[name: "tCapab1", value: cap]])
         }
         script.metaClass.uploadHubFile = { String fn, byte[] b -> }
         def posts = []
@@ -25441,12 +25511,103 @@ class ToolRmNativeCrudSpec extends ToolSpecBase {
             confirm: true
         ])
 
-        then: "returns success: false with explanation that Time triggers have no state field"
+        then: "refuses without implying that every unsupported trigger is a schedule"
         result.success == false
-        result.error?.contains("does not expose a 'state' field")
+        result.error?.contains("does not expose a plain state field")
 
-        and: "hasAll was NOT clicked -- wizard was not committed after the skipped write"
-        !posts.any { it.path == "/installedapp/btn" && it.body?.name == "hasAll" }
+        and: "nothing was written, and Done closed the editor that editCond opened"
+        !posts.any { it.path == "/installedapp/update/json" }
+        posts.findAll { it.path == "/installedapp/btn" }*.body*.name == ["1", "hasAll"]
+
+        where:
+        cap << ["Time", "Mode", "Variable"]
+    }
+
+    @spock.lang.Unroll
+    def "modifyTrigger no-state cleanup reports recovery only when Done fails (patches=#inPatches, closeFails=#closeFails)"() {
+        given:
+        enableWrite()
+        hubGet.register('/installedapp/configure/json/100') { params -> ruleConfigJson(100, "r", []) }
+        hubGet.register('/installedapp/configure/json/100/selectTriggers') { params ->
+            ruleConfigJson(100, "r", [[name: "tCapab1", type: "enum", options: ["Mode"]]])
+        }
+        hubGet.register('/installedapp/statusJson/100') { params ->
+            statusJson(100, [[name: "tCapab1", value: "Mode"]])
+        }
+        script.metaClass.uploadHubFile = { String fn, byte[] b -> }
+        def posts = []
+        script.metaClass.hubInternalPostForm = { String path, Map body, Integer t = 420 ->
+            posts << [path: path, body: body]
+            [status: closeFails && body.name == "hasAll" ? 500 : 200, location: null, data: '']
+        }
+        def edit = [modifyTrigger: [index: 1, mods: [state: "Night"]]]
+        def args = [appId: 100, confirm: true] + (inPatches ?
+            [patches: [edit, [removeTrigger: [index: 1]]]] : edit)
+
+        when:
+        def result = script.toolSetRule(args)
+
+        then: "the unsupported edit is refused without any state write or finalization"
+        result.success == false
+        result.error?.contains("does not expose a plain state field")
+        !posts.any { it.path == "/installedapp/update/json" }
+        posts.findAll { it.path == "/installedapp/btn" }*.body*.name == ["1", "hasAll"]
+        posts.find { it.body.name == "hasAll" }.body.currentPage == "selectTriggers"
+
+        and: "failed cleanup remains visible and directs recovery to the trigger editor"
+        (result.wizardStuck == true) == closeFails
+        if (closeFails) {
+            assert result.error.contains("hasAll")
+            assert result.error.contains("status=500")
+            def hint = inPatches ? result.repairHints[0] : result.restoreHint
+            assert hint.contains("button='hasAll'")
+            assert hint.contains("pageName='selectTriggers'")
+            assert hint.contains("appId=100")
+            assert hint.contains("hub_get_app_config")
+            assert !hint.contains("cancelCapab")
+            assert !hint.contains("actionCancel")
+        }
+
+        and: "the batch stops before another edit can encounter the stale editor"
+        if (inPatches) {
+            assert result.patches[0].op == "modifyTrigger"
+            assert result.patches[1].notAttempted == true
+            assert result.bulkStoppedAfter == "patches[0]"
+            assert result.finalisationNotAttempted == true
+        }
+
+        where:
+        inPatches | closeFails
+        false     | true
+        true      | true
+        false     | false
+        true      | false
+    }
+
+    @spock.lang.Unroll
+    def "modifyTrigger refuses a #cap trigger before opening its editor"() {
+        given:
+        enableWrite()
+        hubGet.register('/installedapp/configure/json/100') { params -> ruleConfigJson(100, "r", []) }
+        hubGet.register('/installedapp/statusJson/100') { params -> statusJson(100, [[name: "tCapab1", value: cap]]) }
+        script.metaClass.uploadHubFile = { String fn, byte[] b -> }
+        def posts = []
+        script.metaClass.hubInternalPostForm = { String path, Map body, Integer t = 420 ->
+            posts << path
+            [status: 200, location: null, data: '']
+        }
+
+        when:
+        def result = script.toolSetRule([appId: 100, modifyTrigger: [index: 1, mods: [state: "on"]], confirm: true])
+
+        then:
+        result.success == false
+        result.error?.contains("has no 'state' value to change")
+        result.error?.contains("RM is not touched")
+        posts.isEmpty()
+
+        where:
+        cap << ["Certain Time (and optional date)", "Periodic Schedule"]
     }
 
     // ============================================================
@@ -31661,6 +31822,31 @@ class ToolRmNativeCrudSpec extends ToolSpecBase {
         result.localVariables[0].type == "integer"
         result.localVariables[0].value == 5
         result.localVariables[1].type == "string"
+    }
+
+    // Live-captured: after an action sets a local, only lv_<name> moves; allLocalVars keeps the
+    // old value until the rule's page renders. The live E2E fields fixture also guards Hubitat's
+    // subscript sandbox, which the stock Groovy test runtime does not enforce.
+    @Unroll
+    def "hub_list_rule_local_variables reads live #localName and preserves fallback values"() {
+        given:
+        enableReadOnly()
+        hubGet.register('/installedapp/statusJson/100') { params ->
+            JsonOutput.toJson([installedApp: [id: 100], appSettings: [], eventSubscriptions: [], scheduledJobs: [],
+                appState: [
+                    [name: "lv_${localName}", value: [name: localName, type: "integer", value: 99], type: "HashMap"],
+                    [name: "allLocalVars", value: [(localName): [type: "integer", value: 1], zzS: [type: "string", value: "a"]], type: "HashMap"]
+                ], state: [:]])
+        }
+
+        when:
+        def result = script.toolListRuleLocalVariables([appId: 100])
+
+        then: "the named local reads live 99; zzS falls back to allLocalVars"
+        result.localVariables == [[name: localName, type: "integer", value: 99], [name: "zzS", type: "string", value: "a"]]
+
+        where:
+        localName << ["zzN", "fields", "class", "metaClass"]
     }
 
     def "hub_list_rule_local_variables returns empty list when the rule has no locals"() {
@@ -47459,6 +47645,30 @@ class ToolRmNativeCrudSpec extends ToolSpecBase {
 
         then:
         posts.any { it.path == "/installedapp/update/json" && it.body["settings[roomDevsL]"] == "11,386" }
+    }
+
+    // Live repro: patches:[{settings:{origLabel:{a:"b"}}}] saved the label as "{a=b}" and reported success.
+    def "a patches settings object on a non-device input is refused before its write"() {
+        given:
+        enableWrite()
+        hubGet.register('/installedapp/configure/json/100') { params ->
+            ruleConfigJson(100, "r", [[name: "origLabel", type: "text", multiple: false]])
+        }
+        hubGet.register('/installedapp/statusJson/100') { params -> statusJson(100) }
+        script.metaClass.uploadHubFile = { String fn, byte[] b -> }
+        def posts = []
+        script.metaClass.hubInternalPostForm = { String path, Map body, Integer t = 420 ->
+            posts << [path: path, body: body]; [status: 200, location: null, data: '{"status":"success"}']
+        }
+
+        when:
+        def result = script.toolSetRule([appId: 100, patches: [[settings: [origLabel: [a: "b"]]]], confirm: true])
+
+        then:
+        result.success == false
+        result.patches[0].success == false
+        result.patches[0].error.contains("only device inputs accept")
+        !posts.any { it.path == "/installedapp/update/json" && it.body.containsKey("settings[origLabel]") }
     }
 
     def "a setting that is not on the page is skipped with a warning naming the sub-pages the page links to"() {
