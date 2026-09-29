@@ -1668,6 +1668,7 @@ For easier bug reporting:
 
 ## Version History
 
+- **v4.4.7** - fix: DateTime hub variables, live rule locals, numeric device ids, post-update setup refresh, RM edit guards; docs: generate TOOL_GUIDE.md from the served tool guide; fix: hub_get_info appUpdate derives updateAvailable from versions (#474). PRs: [#480](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/480), [#481](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/481), [#475](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/475)
 - **v4.4.6** - fix: native-app device pickers, sub-pages and UI page checks; Room Lighting create. PRs: [#477](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/477)
 - **v4.4.5** - feat: per-device and per-variable Hub Mesh link/share (#448). PRs: [#462](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/462)
 - **v4.4.4** - fix: refused addAction editor cleanup, modern-era check, setVariable numOp, patches trigger/action ops. PRs: [#471](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/471)
