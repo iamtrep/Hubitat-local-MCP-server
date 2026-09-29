@@ -246,15 +246,22 @@ def toolGetHubInfo(args = null) {
     // so it must not run on a basic info read.
     if (args?.includeAppUpdate == true) {
         try {
-            if (state.updateCheck) state.updateCheck.checkedAt = null
-            doUpdateCheck()
+            // Kick the async refresh off first so checkInProgress reflects whether it actually
+            // started (asynchttpGet can throw before scheduling). It's async -- handleUpdateCheckResponse
+            // writes state LATER -- so the snapshot below still reflects the PRIOR check.
+            def refreshStarted = doUpdateCheck()
             def uc = state.updateCheck ?: [:]
+            def installed = currentVersion()
             info.appUpdate = [
-                installedVersion: currentVersion(),
+                installedVersion: installed,
                 latestVersion: uc.latestVersion ?: "unknown (check in progress)",
-                updateAvailable: uc.updateAvailable ?: false,
-                lastChecked: uc.checkedAt ? formatTimestamp(uc.checkedAt) : "checking now"
+                updateAvailable: appUpdateAvailable(),
+                lastChecked: uc.checkedAt ? formatTimestamp(uc.checkedAt) : "never",
+                checkInProgress: refreshStarted
             ]
+            // When the last completed check FAILED, checkedAt/lastError advanced but latestVersion did
+            // not -- surface the error so lastChecked doesn't imply the version is fresher than it is.
+            if (uc.lastError) info.appUpdate.lastCheckError = uc.lastError
         } catch (Exception e) {
             info.appUpdate = [error: "App-version check failed: ${e.message}", installedVersion: currentVersion()]
         }
@@ -1141,6 +1148,14 @@ def isNewerVersion(String remote, String local) {
     }
 }
 
+// Derived LIVE from the last-checked latestVersion vs the version installed NOW, so a stored flag
+// can't go stale after an upgrade (a boolean stays true until the next async check overwrites it, so
+// a hub already on the newest release would read "update available: <older>"). isNewerVersion
+// null-guards and rejects non-semver, so the "check in progress" sentinel compares as not-newer.
+def appUpdateAvailable() {
+    return isNewerVersion(state.updateCheck?.latestVersion, currentVersion())
+}
+
 def checkForUpdate() {
     try {
         // Skip if checked within last 24 hours (unless forced)
@@ -1158,6 +1173,9 @@ def checkForUpdate() {
     }
 }
 
+// Returns true when the async request was scheduled, false when asynchttpGet threw before scheduling
+// it -- the boolean lets a caller surface an honest checkInProgress rather than claim a refresh that
+// isn't actually pending.
 def doUpdateCheck() {
     try {
         def params = [
@@ -1166,8 +1184,10 @@ def doUpdateCheck() {
             timeout: 30
         ]
         asynchttpGet("handleUpdateCheckResponse", params)
+        return true
     } catch (Exception e) {
         mcpLog("warn", "server", "Failed to initiate version check: ${e.message}")
+        return false
     }
 }
 
@@ -1178,8 +1198,8 @@ def handleUpdateCheckResponse(resp, data) {
             // Merge checkedAt + lastError onto the existing record (do NOT replace it)
             // so the first-install gate in initialize() flips and the 24h guard engages
             // even when the check never succeeds (e.g. a hub that can't reach GitHub),
-            // WITHOUT clobbering a previously-known latestVersion/updateAvailable -- a
-            // transient failure must not silently drop an already-surfaced update banner.
+            // WITHOUT clobbering a previously-known latestVersion -- a transient failure
+            // must not silently drop an already-surfaced update banner.
             state.updateCheck = (state.updateCheck ?: [:]) + [checkedAt: now(), lastError: "http ${resp.status}"]
             return
         }
@@ -1191,11 +1211,12 @@ def handleUpdateCheckResponse(resp, data) {
             return
         }
         def installed = currentVersion()
+        // Store only the raw inputs; "is an update available" is derived live at read time
+        // (appUpdateAvailable) so a stored flag can't survive an upgrade and read as stale.
         def updateAvailable = isNewerVersion(latestVersion, installed)
         state.updateCheck = [
             latestVersion: latestVersion,
-            checkedAt: now(),
-            updateAvailable: updateAvailable
+            checkedAt: now()
         ]
         if (updateAvailable) {
             log.info "MCP Rule Server update available: v${latestVersion} (installed: v${installed})"
@@ -1277,7 +1298,7 @@ def _getAllToolDefinitions_partSystem() {
                 properties: [
                     identifyHub: [type: "boolean", description: "Blink the hub LED to identify it.", default: false],
                     includeHealthAlerts: [type: "boolean", description: "Include the full health-alerts block.", default: false],
-                    includeAppUpdate: [type: "boolean", description: "Also check GitHub for a newer MCP Rule Server APP version, returned under appUpdate.", default: false]
+                    includeAppUpdate: [type: "boolean", description: "Also check GitHub for a newer MCP Rule Server APP version, returned under appUpdate. The check is async, so appUpdate reflects the prior completed check and carries checkInProgress; call again in a few seconds for the freshest result.", default: false]
                 ]
             ]
         ],

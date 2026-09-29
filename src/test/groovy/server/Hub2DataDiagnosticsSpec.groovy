@@ -54,12 +54,20 @@ class Hub2DataDiagnosticsSpec extends ToolSpecBase {
         version: '2.5.0.143', safeMode: false, alerts: ['not', 'a', 'map']
     ])
 
+    // asynchttpGet is an AppExecutor API method: metaClass stubbing silently no-ops for it, and the
+    // shared per-spec-class mock only honors interactions declared in setupSpec (the additive-stub
+    // pattern; see HarnessSpec's buildAppExecutorMock note). The toggle lets one test drive the real
+    // doUpdateCheck's throw-before-scheduling arm without touching siblings that stub doUpdateCheck.
+    @Shared boolean appCheckThrows = false
+
     def setupSpec() {
         appExecutor.getLocation() >> sharedLocation
+        appExecutor.asynchttpGet(*_) >> { if (appCheckThrows) throw new RuntimeException('github down') }
     }
 
     def cleanup() {
         sharedLocation.hub = null
+        appCheckThrows = false
     }
 
     private TestHub hubOnFirmware(String fw) {
@@ -164,9 +172,9 @@ class Hub2DataDiagnosticsSpec extends ToolSpecBase {
         given:
         sharedLocation.hub = hubOnFirmware('2.5.0.143')
         hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
-        // Seed the app-version-check snapshot + no-op the async refresh so appUpdate carries real values.
-        stateMap.updateCheck = [latestVersion: '9.9.9', updateAvailable: true]
-        script.metaClass.doUpdateCheck = { -> /* no-op: return the seeded snapshot */ }
+        // Seed a prior completed check + stub the async refresh as started so appUpdate carries the snapshot.
+        stateMap.updateCheck = [latestVersion: '9.9.9', updateAvailable: true, checkedAt: 1700000000000L]
+        script.metaClass.doUpdateCheck = { -> true }        // refresh scheduled
 
         when:
         def result = script.toolGetHubInfo([includeAppUpdate: true])
@@ -174,23 +182,111 @@ class Hub2DataDiagnosticsSpec extends ToolSpecBase {
         then:
         result.platformUpdate.available == true             // pending HUB firmware
         result.platformUpdate.availableVersion == '2.5.0.153'
-        result.appUpdate.latestVersion == '9.9.9'           // folded-in MCP server app check, real values
-        result.appUpdate.updateAvailable == true
+        result.appUpdate.latestVersion == '9.9.9'           // folded-in MCP server app check
+        result.appUpdate.updateAvailable == true            // derived: 9.9.9 is newer than the installed version
+        result.appUpdate.checkInProgress == true            // a fresh async check was kicked off for next time
         (result.appUpdate.installedVersion as String) ==~ /\d+\.\d+\.\d+.*/
     }
 
-    def "hub_get_info appUpdate surfaces an app-check error without losing the firmware read"() {
+    def "hub_get_info appUpdate derives updateAvailable from the versions, so a stale flag can't survive an upgrade"() {
         given:
         sharedLocation.hub = hubOnFirmware('2.5.0.143')
         hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
-        script.metaClass.doUpdateCheck = { -> throw new RuntimeException('github down') }
+        // Reproduce the post-HPM-upgrade state: the last check recorded updateAvailable:true against an
+        // older installed version, and still says true even though latest now equals the installed version.
+        def installed = script.currentVersion()
+        stateMap.updateCheck = [latestVersion: installed, updateAvailable: true, checkedAt: 1700000000000L]
+        script.metaClass.doUpdateCheck = { -> true }
 
         when:
         def result = script.toolGetHubInfo([includeAppUpdate: true])
 
         then:
-        result.appUpdate.error.contains('App-version check failed')   // failed app check is visible...
-        result.platformUpdate.available == true                       // ...and the firmware read still survives
+        result.appUpdate.latestVersion == installed
+        result.appUpdate.updateAvailable == false           // latest == installed -> no update; the stale true is ignored
+    }
+
+    def "hub_get_info appUpdate reports in-progress when no prior check has completed"() {
+        given:
+        sharedLocation.hub = hubOnFirmware('2.5.0.143')
+        hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
+        stateMap.updateCheck = null
+        script.metaClass.doUpdateCheck = { -> true }
+
+        when:
+        def result = script.toolGetHubInfo([includeAppUpdate: true])
+
+        then:
+        result.appUpdate.latestVersion == 'unknown (check in progress)'
+        result.appUpdate.updateAvailable == false
+        result.appUpdate.lastChecked == 'never'
+        result.appUpdate.checkInProgress == true
+    }
+
+    def "hub_get_info appUpdate reports checkInProgress from doUpdateCheck (false when the refresh did not start)"() {
+        given:
+        sharedLocation.hub = hubOnFirmware('2.5.0.143')
+        hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
+        stateMap.updateCheck = [latestVersion: '9.9.9', updateAvailable: true, checkedAt: 1700000000000L]
+        script.metaClass.doUpdateCheck = { -> false }       // refresh failed to start
+
+        when:
+        def result = script.toolGetHubInfo([includeAppUpdate: true])
+
+        then: "we don't claim a refresh is pending when it never started"
+        result.appUpdate.checkInProgress == false
+        result.appUpdate.latestVersion == '9.9.9'           // the prior snapshot still surfaces
+    }
+
+    def "hub_get_info appUpdate leaves the stored checkedAt untouched (the read never rewrites it)"() {
+        given:
+        sharedLocation.hub = hubOnFirmware('2.5.0.143')
+        hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
+        def seeded = 1700000000000L
+        stateMap.updateCheck = [latestVersion: '9.9.9', checkedAt: seeded]
+        script.metaClass.doUpdateCheck = { -> true }        // async write lands in a LATER execution
+
+        when:
+        def result = script.toolGetHubInfo([includeAppUpdate: true])
+
+        then: "the snapshot reports the seeded timestamp and the read does not null or rewrite it"
+        result.appUpdate.lastChecked == script.formatTimestamp(seeded)
+        stateMap.updateCheck.checkedAt == seeded
+    }
+
+    def "hub_get_info appUpdate surfaces lastCheckError when the last check failed"() {
+        given:
+        sharedLocation.hub = hubOnFirmware('2.5.0.143')
+        hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
+        // A failed check advances checkedAt + lastError but keeps the older latestVersion.
+        stateMap.updateCheck = [latestVersion: '9.9.9', checkedAt: 1700000000000L, lastError: 'http 503']
+        script.metaClass.doUpdateCheck = { -> true }
+
+        when:
+        def result = script.toolGetHubInfo([includeAppUpdate: true])
+
+        then: "the error is surfaced so lastChecked doesn't imply a fresher version than we have"
+        result.appUpdate.lastCheckError == 'http 503'
+        result.appUpdate.latestVersion == '9.9.9'
+    }
+
+    def "hub_get_info appUpdate degrades to the normal snapshot (not an error map) when the async check throws"() {
+        given:
+        sharedLocation.hub = hubOnFirmware('2.5.0.143')
+        hubGet.register('/hub2/hubData') { params -> HUB2_UPDATE_AND_ALERT }
+        // Real doUpdateCheck runs: asynchttpGet throws before scheduling -> doUpdateCheck catches it and
+        // returns false, so appUpdate is the ordinary prior-check view rather than an error map.
+        appCheckThrows = true
+        stateMap.updateCheck = [latestVersion: '9.9.9', checkedAt: 1700000000000L]
+
+        when:
+        def result = script.toolGetHubInfo([includeAppUpdate: true])
+
+        then:
+        !result.appUpdate.containsKey('error')          // the throw is swallowed, not surfaced as an error map
+        result.appUpdate.checkInProgress == false       // and we don't claim a refresh that never started
+        result.appUpdate.latestVersion == '9.9.9'       // the prior snapshot still surfaces
+        result.platformUpdate.available == true         // the firmware read still survives
     }
 
     def "hub_get_info omits appUpdate unless includeAppUpdate=true"() {
