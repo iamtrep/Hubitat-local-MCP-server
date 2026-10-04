@@ -328,6 +328,8 @@ For replace/add every id is validated against the full hub device list (discover
 
 If the hub's device inventory is incomplete (its device tree could not be read, or it disagrees with the picker feed), an id it lacks is reported as "could not validate" instead of unknown. Nothing is written, so retry later. An empty scope still leaves MCP-managed virtual devices reachable. On success the response carries `selectedDevices: {mode, authorizedDeviceIds, authorizedCount, added, removed}`.
 
+**`enableLocalAccess` / `enableCloudAccess`** -- allow requests over the LAN endpoint / the Hubitat cloud endpoint (both ON by default). A disabled endpoint answers HTTP 403 to every request, even with a valid token; turning it back on restores access with the same token and URL. A call cannot turn off the connection it arrived on (that would lock the caller out) -- switch it off from the other connection or the app page on the hub. `hub_get_info` reports both as `localAccessEnabled` / `cloudAccessEnabled`.
+
 **Deliberately NOT allowlisted:**
 - `enableWrite` -- would disable this tool's own write path mid-session.
 - `enableDeveloperMode` -- lockout protection; must stay UI-only to disable.
@@ -863,7 +865,7 @@ Only query devices the user has mentioned or that are relevant to their request.
 
 ## Installed-App & Native-Rule Tools
 
-Protected apps selected in the MCP server Hubitat app UI refuse generic app/native-rule and Easy/legacy Dashboard mutations even with Developer Mode enabled. Creating children under protected parents is also refused. The MCP instance is selected once on new installs and upgrades; later choices, including an empty list, persist. Reads and dedicated Developer Mode settings/package maintenance remain available. Change this list in the Hubitat UI and click Done to apply it.
+Protected apps selected in the MCP server Hubitat app UI refuse generic app/native-rule and Easy/legacy Dashboard mutations even with Developer Mode enabled. Creating children under protected parents is also refused. The MCP instance is selected once on new installs and upgrades; later choices, including an empty list, persist. Reads and dedicated Developer Mode settings/package maintenance remain available. Change this list on the app's Advanced page in the Hubitat UI, then click Done on the main page to apply it.
 
 Tools in the hub_read_apps_code and hub_manage_native_rules_and_apps gateways are gated by the two universal masters. The read tools (hub_list_apps any scope, hub_list_device_dependents, hub_get_app_config, hub_list_app_pages, hub_list_hpm_packages with optional includeDrift) require the Read master (ON by default). The hub_manage_native_rules_and_apps write tools require the Write master; the destructive CRUD tools (hub_set_rule / hub_set_native_app / hub_delete_native_app) ALSO require confirm=true + a recent backup (requireDestructiveConfirm). If the user sees "Read tools are disabled" or "Write tools are disabled" errors, direct them to the Read/Write toggles on the MCP Rule Server app settings page.
 
