@@ -3320,6 +3320,10 @@ class TestRunner:
         # Config read-back: the read-only details surface still answers after the write.
         details = self.client.call_tool("hub_get_radio_details", {"radio": "zwave"})
         assert isinstance(details, dict), f"hub_get_radio_details read-back did not return an object: {details}"
+        # The Hub object has no zwaveVersion on current firmware; the details JSON's firmware fills it.
+        zw_fw = (details.get("zwaveData") or {}).get("firmwareVersion") if isinstance(details.get("zwaveData"), dict) else None
+        if zw_fw:
+            assert details.get("zwaveVersion") not in (None, "unavailable"), f"zwaveVersion must be filled when the details carry firmware {zw_fw}: {details}"
 
     @test("diagnostics")
     def test_set_zigbee_enabled_idempotent(self) -> None:
@@ -3329,6 +3333,14 @@ class TestRunner:
             "hub_set_zigbee", {"enabled": True}, "hub_set_zigbee(enabled=true)")
         details = self.client.call_tool("hub_get_radio_details", {"radio": "zigbee"})
         assert isinstance(details, dict), f"hub_get_radio_details read-back did not return an object: {details}"
+        # The Hub object has no zigbeeChannel on current firmware; the details JSON's channel fills it.
+        zb_channel = (details.get("zigbeeData") or {}).get("channel") if isinstance(details.get("zigbeeData"), dict) else None
+        if zb_channel is not None:
+            assert details.get("zigbeeChannel") not in (None, "unavailable"), \
+                f"zigbeeChannel must be filled when the details carry channel {zb_channel}: {details}"
+            info = self.client.call_tool("hub_get_info")
+            assert info.get("zigbeeChannel") in (zb_channel, "unavailable"), \
+                f"hub_get_info must report the same Zigbee channel as the radio details ({zb_channel}): {info.get('zigbeeChannel')}"
 
     @test("diagnostics")
     def test_call_zwave_repair_start_then_cancel(self) -> None:
@@ -7012,10 +7024,13 @@ class TestRunner:
                 {"page": "offMeansPage", "operation": "done", "hrefContext": {"fromPage": "mainPage"}}]}})
             assert off.get("success") is False and "required but empty" in str((off.get("steps") or [{}])[-1].get("error")), \
                 f"Done with an empty required input must be refused: {off}"
-            # The same refusal as a single step posts nothing, so it must not steer toward a backup restore.
+            # A drive whose last Done was refused is not finalized: no mainPage Done, no update lifecycle.
+            assert off.get("mainPageDoneSkipped") is True and "mainPageDoneFailed" not in off, \
+                f"a refused drive must not run the mainPage Done finalize: {off}"
+            # The same refusal as a single step submits nothing, so it must not steer toward a backup restore.
             single = call_native({"walkStep": {"page": "offMeansPage", "operation": "done",
                                                "hrefContext": {"fromPage": "mainPage"}}})
-            assert single.get("success") is False and "the app was not touched" in str(single.get("restoreHint")), \
+            assert single.get("success") is False and "no Done was sent" in str(single.get("restoreHint")), \
                 f"a refused Done must report that nothing was submitted: {single}"
             # The {id: label} map form is accepted by walkStep too, and echoes as the committed id.
             fixed = call_native({"walkStep": {"operation": "drive", "steps": [
@@ -9802,18 +9817,32 @@ class TestRunner:
             assert bulk_kept in page and repl_kept not in page, \
                 f"a replaceActions refused before the clear must leave the existing list intact: {page}"
 
-            # Fail-closed replacement: an item refused only inside its add (an unknown switch verb passes
-            # the pre-clear checks) stops the batch after the clear, so only the clean first replacement
-            # item remains; skipping finalisation is not a rollback.
-            repl_stop = self._rm_stop_call(app_id, {"replaceActions": [
+            # An argument the builder alone checked (an unknown switch verb) is refused before the clear
+            # too, so the existing list survives.
+            verb_refused = self._rm_stop_call(app_id, {"replaceActions": [
                 {"capability": "log", "message": repl_kept},
                 {"capability": "switch", "action": "blink", "deviceIds": [int(self.get_test_switch_id())]},
+            ]})
+            assert verb_refused.get("success") is False and not verb_refused.get("removedIndices") \
+                and "replaceActions[1]: Unknown switch action 'blink'" in str(verb_refused.get("error", "")), \
+                f"an unknown verb must be refused before anything is cleared: {verb_refused}"
+            page = self._rule_page_text(app_id)
+            assert bulk_kept in page and repl_kept not in page, \
+                f"a replaceActions refused for its arguments must leave the existing list intact: {page}"
+
+            # Fail-closed replacement: an item refused only inside its add (a fileDelete whose file the
+            # hub does not have is checked against the editor's live file list) stops the batch after
+            # the clear, so only the clean first replacement item remains; skipping finalisation is not
+            # a rollback.
+            repl_stop = self._rm_stop_call(app_id, {"replaceActions": [
+                {"capability": "log", "message": repl_kept},
+                {"capability": "fileDelete", "fileName": f"{PREFIX}missing_file.txt"},
                 {"capability": "log", "message": repl_skipped},
             ]})
             added = repl_stop.get("addedActions") or []
             assert len(added) == 3 and added[0].get("success") is not False \
                 and not added[0].get("partial") and added[1].get("success") is False \
-                and "Unknown switch action 'blink'" in str(added[1].get("error", "")), \
+                and "is not a file on the hub" in str(added[1].get("error", "")), \
                 f"expected a clean replacement item, then the refusal, then the skipped tail: {repl_stop}"
             self._assert_bulk_stop(repl_stop, "replaceActions[1]", added[2:])
             page = self._rule_page_text(app_id)
@@ -10064,6 +10093,29 @@ class TestRunner:
         if leftover:
             self._delete_native(leftover)
             raise AssertionError(f"an argument-refused create left rule {leftover} behind")
+
+        # The same holds for an action argument only the action builder used to check (a dimmer level).
+        self._native_rule_fixture_seq = getattr(self, "_native_rule_fixture_seq", 0) + 1
+        act_label = f"{PREFIX}CreateRefusedAct_{_run_artifact_suffix()}_{self._native_rule_fixture_seq}"
+        try:
+            act_refused = self.client.call_tool("hub_manage_rule_machine", {
+                "tool": "hub_set_rule",
+                "args": {
+                    "name": act_label,
+                    "addActions": [
+                        {"capability": "log", "message": "E2E create refused action"},
+                        {"capability": "dimmer", "action": "setLevel"},
+                    ],
+                    "confirm": True,
+                }})
+            raise AssertionError(f"a create with an argument-refused action must be refused, got: {act_refused}")
+        except McpToolError as exc:
+            assert "No rule was created" in str(exc) and "actions[1]" in str(exc), \
+                f"the action-argument refusal must name the item and say no rule was created: {exc}"
+        leftover = self._find_app_id_by_label(act_label)
+        if leftover:
+            self._delete_native(leftover)
+            raise AssertionError(f"an action-argument-refused create left rule {leftover} behind")
 
         # Fail-closed create across sections: the clean trigger lands, a trigger only the live wizard
         # can refuse (a capability outside its picker) stops the create, and the Required Expression
@@ -12442,6 +12494,9 @@ class TestRunner:
         assert isinstance(loc, dict), f"hub_list_backups(scope=hub_local) returned {type(loc).__name__}"
         assert "hubLocalBackups" in loc or "hubBackupErrors" in loc, \
             f"scope=hub_local missing hubLocalBackups/hubBackupErrors: {sorted(loc.keys())}"
+        for entry in loc.get("hubLocalBackups") or []:
+            assert entry.get("size") is not None and isinstance(entry.get("fullBackup"), bool), \
+                f"a local backup entry must carry its size and fullBackup flag: {entry}"
 
         cloud = self.client.call_tool("hub_manage_backup", {"tool": "hub_list_backups", "args": {"scope": "hub_cloud"}})
         assert isinstance(cloud, dict), f"hub_list_backups(scope=hub_cloud) returned {type(cloud).__name__}"
@@ -12751,7 +12806,9 @@ class TestRunner:
         assert "platformUpdate" in result, f"hub_get_info missing platformUpdate: {sorted(result)}"
         pu = result["platformUpdate"]
         assert "currentVersion" in pu, f"platformUpdate missing currentVersion: {pu}"
-        assert isinstance(pu.get("available"), bool), \
+        # Firmware 2.5.2.129+ no longer reports a pending update in /hub2/hubData; available is then
+        # null with a note, never a guessed false.
+        assert isinstance(pu.get("available"), bool) or (pu.get("available") is None and pu.get("note")), \
             f"platformUpdate.available not resolved -- /hub2/hubData unreadable? {pu}"
         if pu["available"]:
             assert pu.get("availableVersion"), f"available=true but no availableVersion: {pu}"
@@ -13188,6 +13245,11 @@ class TestRunner:
         # platform-update fields are surfaced via platformUpdate, not duplicated in the alert details
         assert "platformUpdateAvailable" not in ha["details"], \
             f"platformUpdate leaked into healthAlerts.details: {sorted(ha['details'])}"
+        # Firmware 2.5.2.129+ reports alerts only as alertItems: every item must surface in active.
+        items = ha["details"].get("alertItems")
+        if isinstance(items, list):
+            keys = sorted({str(i["key"]) for i in items if isinstance(i, dict) and i.get("key")})
+            assert ha["active"] == keys, f"healthAlerts.active must list the alert item keys {keys}: {ha}"
 
     @test("system_tools")
     def test_hub_get_info_update_reads(self) -> None:
