@@ -5471,6 +5471,18 @@ class TestRunner:
             assert default_first_key and default_second_key == default_first_key, \
                 f"same-rule edits should reuse one recent baseline by default: first={res}, second={wrapped}"
 
+            # The baseline file keeps the app type record minus its OAuth client credentials and
+            # passwords. The message names keys only, so a failure cannot print a secret.
+            backup_file = (res.get("backup") or {}).get("fileName")
+            assert backup_file, f"addAction result names no backup file: {res.get('backup')}"
+            raw = self.client.call_tool("hub_manage_files", {
+                "tool": "hub_read_file", "args": {"fileName": backup_file}})
+            snapshot = json.loads(raw.get("content") or "{}")
+            app_type = ((snapshot.get("configJson") or {}).get("app") or {}).get("appType")
+            leaked = {"oauthClientId", "oauthClientSecret", "encryptedPassword", "sourcePassword"} & set(app_type or {})
+            assert isinstance(app_type, dict) and app_type.get("name") and not leaked, \
+                f"rule backup appType still carries credential fields {sorted(leaked)}; keys={sorted(app_type or {})}"
+
             # One live rule proves the opt-in strict mode without making the rest of
             # E2E pay the per-write File Manager cost. Restore OFF in finally.
             self.client.call_tool("hub_manage_mcp", {
@@ -11842,6 +11854,46 @@ class TestRunner:
             blob = str(exc).lower()
             assert "appid" in blob or "deviceid" in blob or "exclusive" in blob, \
                 f"mutual-exclusivity refusal does not name the conflicting params: {exc}"
+
+    @test("installed_app_reads")
+    def test_redact_access_tokens_toggle(self) -> None:
+        # The server's own app page shows its endpoint URLs with the live access token.
+        # redactAccessTokens (default OFF) must hide it from the read. Assertion messages
+        # never include page text, so a failure cannot print the token.
+        marker = "***redacted (access token)***"
+
+        def set_redact(on: bool) -> None:
+            self.client.call_tool("hub_manage_mcp", {
+                "tool": "hub_update_mcp_settings",
+                "args": {"settings": {"redactAccessTokens": on}, "confirm": True},
+            })
+
+        def page_text() -> str:
+            res = self.client.call_tool("hub_read_apps_code", {
+                "tool": "hub_get_app_config", "args": {"appId": str(self.client.app_id)}})
+            assert res.get("success") is True, "server app page read failed"
+            return " ".join(p for sect in ((res.get("page") or {}).get("sections") or [])
+                            for p in (sect.get("paragraphs") or []))
+
+        set_redact(False)
+        try:
+            tokens = re.findall(r"access_token=([^&\s\"'<>#]+)", page_text())
+            assert tokens and not any(t.startswith("***") for t in tokens), \
+                "server app page shows no access_token endpoint URL with redactAccessTokens off"
+            set_redact(True)
+            hidden = page_text()
+            assert f"access_token={marker}" in hidden, \
+                "redactAccessTokens on: endpoint URLs missing or not marked as redacted"
+            assert not any(t in hidden for t in tokens), \
+                "redactAccessTokens on: the access token is still in the page read"
+        finally:
+            unwinding = sys.exc_info()[0] is not None
+            try:
+                set_redact(False)
+            except Exception as exc:
+                if not unwinding:
+                    raise
+                print(f"  [WARN] could not restore redactAccessTokens=false: {exc}")
 
     # -----------------------------------------------------------------------
     # GROUP 4g: device_swap (1 test) -- hub_call_device_swap child-device

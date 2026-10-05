@@ -9379,6 +9379,11 @@ private Map _rmBackupRuleSnapshotLocked(Integer ruleId, String reason) {
         def bareKey = (exactKey == null && bare != null) ? _appTypeRegistry().find { typeKey, reg -> reg.appName == bare }?.key : null
         detectedAppType = exactKey ?: bareKey ?: detectedAppType
     }
+    // The hub's appType record carries the app type's OAuth client credentials and passwords
+    // (populated for Rule-5.1); restore never reads them, so they stay out of File Manager.
+    if (config?.app?.appType instanceof Map) {
+        ["oauthClientId", "oauthClientSecret", "encryptedPassword", "sourcePassword"].each { config.app.appType.remove(it) }
+    }
 
     def snapshot = [
         schemaVersion: 1,
