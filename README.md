@@ -174,7 +174,7 @@ Add this block, using your **local** URL (`http://YOUR_HUB_IP/apps/api/123/mcp?a
 - `--protocol auto` lets `mcp-remote` use MCP 2026-07-28 with the hub, so slow writes (rules, native apps, drivers, device changes) that need more than one request complete instead of showing a generic error.
 - To troubleshoot, add `"--debug"` to `args`; `mcp-remote` then writes a verbose log under `~/.mcp-auth/` (`%USERPROFILE%\.mcp-auth\` on Windows). That log includes your full connect URL and access token, so redact it before sharing.
 
-> **Previously used `mcp-proxy` (`uvx`)?** Replace that block with the one above. `mcp-proxy` 0.12.0 (its latest release, May 2026) crashes on startup without a `--with "mcp<2.0.0"` pin since the `mcp` Python SDK 2.0.0 release (28 July 2026), and it can't complete the hub's multi-request slow writes. See [#373](https://github.com/kingpanther13/Hubitat-local-MCP-server/issues/373).
+> **Previously used `mcp-proxy` (`uvx`)?** Replace that block with the one above. `mcp-proxy` is no longer recommended. It has multiple compatibility issues, does not support many of the servers features, and does not support MCP 2.0. See [#373](https://github.com/kingpanther13/Hubitat-local-MCP-server/issues/373).
 
 Save the file, then fully restart Claude Desktop (Quit from the system tray / menu bar — closing the window is not enough). The Hubitat tools appear under the tools (🔨) icon.
 
@@ -937,7 +937,7 @@ Alternatively, the app's Device Access section has a **Bypass Device Allowlist**
 <details>
 <summary><b>Claude Desktop won't connect, or slow writes show a generic error</b></summary>
 
-- **An `mcp-proxy` (`uvx`) config stopped connecting** (often `ImportError: cannot import name 'request_ctx'`): switch to the `mcp-remote` setup in the *Claude Desktop* section above.
+- **An `mcp-proxy` (`uvx`) config stopped connecting** (often `ImportError: cannot import name 'request_ctx'`): mcp-proxy is no longer supported. It has multiple compatibility issues and doesn't support MCP 2.0. Switch to mcp-remote as per the setup instructions above.
 - **A write returns "Error occurred during tool execution" with no result:** the client didn't continue a slow write. In Claude Desktop, use `mcp-remote` with `--protocol auto`. Claude.ai connectors don't continue these writes yet. The write still finishes on the hub, so check `hub_get_info` → `recentWrites` and read the target before repeating it.
 - After editing the config, fully quit Claude Desktop (system tray / menu bar), not just the window.
 
