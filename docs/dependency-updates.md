@@ -3,6 +3,10 @@
 Renovate proposes Gradle library and wrapper updates. Dependabot continues to
 update GitHub Actions; GitHub dependency alerts remain independent of that split.
 Every update requires review: Renovate automerge and platform automerge are off.
+Merging a Renovate or Dependabot PR never triggers a Hubitat app version bump or
+release tag, even if that PR carries a `release:*` label. Dependency version
+updates inside the PR still apply; a later human-authored release PR can release
+the accumulated changes.
 The weekly window is Monday 08:00–11:59 America/New_York, with at most three
 Renovate PRs open at once. Its Dependency Dashboard exposes pending updates and
 lookup failures.
@@ -67,6 +71,22 @@ The configuration takes effect after it reaches the default branch and the app
 has access. A config file by itself does not install or activate the hosted bot.
 The maintainer controls that installation and merging; neither is performed by
 the validation workflow.
+
+## Hub E2E
+
+Renovate and Dependabot PRs skip the deployment approval and live-hub jobs only
+when every changed file is in the dependency/CI allowlist in
+`.github/scripts/lane_gate.js`. The early gate posts an explicit “E2E not required”
+status; it does not claim the hub tests passed. Other CI checks still run. Workflow-only updates qualify for the exemption; their
+implementation is reviewed through the non-E2E checks, without deploying the hub.
+
+Changes to shipped app/library sources, package metadata, or app-generation tools
+retain the normal E2E flow, even on a bot-authored PR. Unknown paths, renames from
+non-exempt paths, API failures, incomplete file lists, and a head that changed
+during classification never grant the exemption. The PR author determines bot
+identity, so a maintainer clicking re-run does not create an approval request for
+a dependency-only update. An explicit `workflow_dispatch` can still run E2E;
+`e2e:skip` continues to hold the merge gate pending.
 
 ## Validation
 
