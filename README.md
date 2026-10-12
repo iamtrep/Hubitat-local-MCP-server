@@ -1664,6 +1664,7 @@ For easier bug reporting:
 
 ## Version History
 
+- **v4.7.1** - feat: add appTypeId to hub_list_apps(scope='instances') rows. PRs: [#527](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/527)
 - **v4.7.0** - docs: note mcp-proxy 0.13.0 fixes the startup crash, keep mcp-remote for Claude Desktop; feat: deliver one inlined parent app through HPM instead of a library bundle. PRs: [#528](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/528), [#525](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/525)
 - **v4.6.0** - feat: adopt firmware 2.5.2 hub changes. PRs: [#520](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/520)
 - **v4.5.7** - fix: accept bestPracticeKey inside args on direct write tools. PRs: [#519](https://github.com/kingpanther13/Hubitat-local-MCP-server/pull/519)
