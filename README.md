@@ -861,8 +861,10 @@ When you use `hub_update_app`, `hub_update_driver`, `hub_update_library`, or `hu
 - Named `mcp-backup-app-<id>.groovy`, `mcp-backup-driver-<id>.groovy` or `mcp-backup-library-<id>.groovy`; a replacement taken while the previous one is still indexed carries a `-<uuid>` suffix before `.groovy`
 - Persist even if the MCP app is uninstalled
 - Downloadable at `http://<your-hub-ip>/local/<filename>`
-- Max 20 kept in total across source, rule-snapshot and pre-restore backups; oldest pruned automatically
 - 1-hour protection window: multiple edits preserve the pre-edit original
+- No count limit: backups are removed only when all MCP backups together exceed the **Backup storage budget (MB)** advanced setting (default 10, range 1 to 1000000). Another item's backup never replaces yours, but past the budget any new backup can evict the oldest backups of any item: rolling steps first, then pinned baselines
+- Each app, driver and library keeps one pinned baseline. A rule keeps a pinned baseline per editing session plus its pre-delete and Required Expression replacement snapshots, and with **Back up before every native app edit** on, its other per-write snapshots as rolling steps. An editing session ends once an hour passes with no snapshot of that rule. `hub_list_backups` shows the budget and whether each backup is pinned or rolling
+- `hub_write_file` and `hub_delete_file` keep the newest 5 `<name>_backup_<timestamp>` copies of each file
 
 **Restore via MCP:**
 1. `hub_list_backups` to see available backups
